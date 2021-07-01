@@ -25,14 +25,16 @@
  * The pins of the microcontroller have been given different names,
  * this should probably have been stored in a HAL lib to make stuff more clean.
  * 
- * The terminal() function has room for improvement, possibly by replasing it with
- * a state machine.
+ * The terminal() function has room for improvement, possibly by replacing it with
+ * a (proper) state machine.
  * 
  */
 
 #include <Arduino.h>
 #include <avr/pgmspace.h>
 #include <errno.h>
+
+#define SW_VERSION "0.1"
 
 
 /* Uncomment for color support, if your terminal supports ANSI escape codes */
@@ -51,6 +53,8 @@ d - Output 8-bit word on D0 - D7
 ra - Read analog voltage on A0 - A5
 rd - Read digital status on A0 - A5
 )";
+
+const char* about_string = ("Arduino logic generator and MONitor - AMON. v" SW_VERSION "\n\nDeveloped at Western Norway University of Applied Sciences.\n\n");
 
 const uint8_t c_backspace = 8;
 const uint8_t c_space = 32;
@@ -85,12 +89,15 @@ void set_terminal_color(color_t color);
 
 //void plot_inputs();
 
-void print_io_status();
+void print_digital_io_status();
 void read_digital_inputs_a0_a5();
 void read_digital_inputs_d2_d12();
 void read_analog_inputs_a0_a5();
 void write_digital_outputs_d2_d9(uint8_t value);
 void write_digital_outputs_d10_d12(uint8_t value);
+
+void serial_print_binary(int num, int size);
+void serial_print_hex(int num, int size);
 
 void serial_printf(HardwareSerial& serial, const char* fmt, ...);
 
@@ -117,7 +124,7 @@ void terminal(){
   uint8_t i = 0;
 
   set_terminal_color(RED);
-  Serial.print("MON>");
+  Serial.print("AMON>");
   set_terminal_color(WHITE);
   do{
 
@@ -156,6 +163,9 @@ void terminal(){
 
     if(i > 0){
       command_interpreter(rx_buffer);
+    }
+    else if (i == 0){
+      print_digital_io_status();
     }
 
 }
@@ -296,12 +306,12 @@ void command_interpreter(const uint8_t * cmd){
   }
   else if (!strncmp_P((const char*)cmd, PSTR("STATUS"),6)){
 
-    print_io_status();
+    print_digital_io_status();
 
   }
-  else if (!strncmp_P((const char*)cmd, PSTR("HVL"),3)){
+  else if (!strncmp_P((const char*)cmd, PSTR("ABOUT"),3)){
 
-    Serial.println("IDER.");
+    Serial.print(about_string);
 
   }
   else if (!strncmp_P((const char*)cmd, PSTR("PLOT"),4)){
@@ -315,7 +325,47 @@ void command_interpreter(const uint8_t * cmd){
 
 }
 
-void print_io_status(){
+/**
+ * One line compact status of all I/O.
+*/
+void print_digital_io_status(){
+
+  uint8_t pin = 0;
+  uint8_t port = 0;
+
+  /** 
+   * Read bit by bit using digitalRead, instead of the
+   * entire port, since the pins potentionally can use
+   * different ports in the uC.
+   */
+  for(uint8_t i = 0; i < 8; i++){
+    pin = i + 2;
+    port += (digitalRead(pin) << i); 
+  }
+
+  serial_printf(Serial, "D: %7B %2X\t",port, port);
+
+  port = 0;
+  for(uint8_t i = 0; i < 3; i++){
+    pin = i + 10;
+    port += (digitalRead(pin) << i); 
+  }
+
+  serial_printf(Serial, "P: %2B %2X\t",port, port);
+
+  port = 0;
+  for(uint8_t i = 0; i <= 5; i++){
+    pin = A0 + i;
+    pinMode(pin, INPUT);
+    port += (digitalRead(pin) << i); 
+  }
+
+  serial_printf(Serial, "A: %5B %2X\t", port, port);
+
+  serial_printf(Serial, "C: %o\n", digitalRead(clk_pin));
+}
+
+void print_colored_io_status(){
 
   
   #ifdef USE_ANSI_ESCAPE_CODE
@@ -328,10 +378,21 @@ void print_io_status(){
 
 void clock_pulse(){
 
-  Serial.println("CLK pulse");
-  digitalWrite(clk_pin, HIGH);
-  delay(50);
-  digitalWrite(clk_pin, LOW);
+
+  if(digitalRead(clk_pin)){
+    Serial.println("CLK pulse. Idle high.");
+    digitalWrite(clk_pin, LOW);
+    delay(50);
+    digitalWrite(clk_pin, HIGH);
+  }
+  else{
+    Serial.println("CLK pulse. Idle low.");
+    digitalWrite(clk_pin, HIGH);
+    delay(50);
+    digitalWrite(clk_pin, LOW);
+  }
+
+
 }
 
 void read_digital_inputs_a0_a5(){
@@ -368,11 +429,7 @@ void write_digital_outputs_d2_d9(uint8_t value){
 
   /* Outputs D2 - D9 are renamed D0 to D7 for this applicaiton. */
 
-  serial_printf(Serial, "DEC: %i \t HEX: %X\n", value, value);
-
   uint8_t bit;
-
-//  for(uint8_t i = 0; i <= 7; i++){
 
   // TODO: This is a bit messy, fix it.
 
@@ -380,13 +437,12 @@ void write_digital_outputs_d2_d9(uint8_t value){
     bit = (value >> (i - 1))&0x01;
 
     pinMode(1 + i, OUTPUT);
-    serial_printf(Serial, "D%i:%i\t",i - 1, bit);
+    //serial_printf(Serial, "D%i:%i\t",i - 1, bit);
     digitalWrite(1 + i, bit);
 
   }
 
-  Serial.println();
-
+  print_digital_io_status();
 }
 
 void write_digital_outputs_d10_d12(uint8_t value){
@@ -566,6 +622,39 @@ void clear_terminal(){
 //}
 
 
+/*
+ * Simple printf for writing to an Arduino serial port.  Allows specifying Serial..Serial3.
+ *
+ * Soruce: https://gist.github.com/ridencww/4e5d10097fee0b0f7f6b
+ * Slightly modified to allow printing of leading zeros in binary numbers.
+ * 
+ * const HardwareSerial&, the serial port to use (Serial..Serial3)
+ * const char* fmt, the formatting string followed by the data to be formatted
+ * 
+ * int d = 65;
+ * float f = 123.4567;
+ * char* str = "Hello";
+ * serial_printf(Serial, "<fmt>", d);
+ * 
+ * Example:
+ *   serial_printf(Serial, "Sensor %d is %o and reads %1f\n", d, d, f) will
+ *   output "Sensor 65 is on and reads 123.5" to the serial port.
+ * 
+ * Formatting strings <fmt>
+ * %B    - binary (d = 0b1000001)
+ * %b    - binary (d = 1000001)  
+ * %c    - character (s = H)
+ * %d/%i - integer (d = 65)\
+ * %f    - float (f = 123.45)
+ * %3f   - float (f = 123.346) three decimal places specified by %3.
+ * %o    - boolean on/off (d = On)
+ * %s    - char* string (s = Hello)
+ * %X    - hexidecimal (d = 0x41)
+ * %x    - hexidecimal (d = 41)
+ * %%    - escaped percent ("%")
+ * Thanks goes to @alw1746 for his %.4f precision enhancement 
+ */
+
 void serial_printf(HardwareSerial& serial, const char* fmt, ...) { 
     va_list argv;
     va_start(argv, fmt);
@@ -584,7 +673,8 @@ void serial_printf(HardwareSerial& serial, const char* fmt, ...) {
                 case 'B':
                     serial.print("0b"); // Fall through intended
                 case 'b':
-                    serial.print(va_arg(argv, int), BIN);
+                    //serial.print(va_arg(argv, int), BIN);
+                    serial_print_binary(va_arg(argv, int), places);
                     break;
                 case 'c': 
                     serial.print((char) va_arg(argv, int));
@@ -600,7 +690,7 @@ void serial_printf(HardwareSerial& serial, const char* fmt, ...) {
                     serial.print(va_arg(argv, long), DEC);
                     break;
                 case 'o':
-                    serial.print(va_arg(argv, int) == 0 ? "off" : "on");
+                    serial.print(va_arg(argv, int) == 0 ? "LOW" : "HIGH");
                     break;
                 case 's': 
                     serial.print(va_arg(argv, const char*));
@@ -608,7 +698,8 @@ void serial_printf(HardwareSerial& serial, const char* fmt, ...) {
                 case 'X':
                     serial.print("0x"); // Fall through intended
                 case 'x':
-                    serial.print(va_arg(argv, int), HEX);
+                    //serial.print(va_arg(argv, int), HEX);
+                    serial_print_hex(va_arg(argv, int), places);
                     break;
                 case '%': 
                     serial.print(fmt[i]);
@@ -622,4 +713,32 @@ void serial_printf(HardwareSerial& serial, const char* fmt, ...) {
         }
     }
     va_end(argv);
+}
+
+void serial_print_binary(int num, int size){
+
+  uint8_t len = (log10(num) / log10(2)) + 1;
+
+  for(uint8_t i = 0; i < (size - len); i++){
+    Serial.print("0");
+  }
+
+  Serial.print(num, BIN);
+}
+
+void serial_print_hex(int num, int size){
+
+  uint8_t len = (log10(num) / log10(16));
+  len = len + 1;
+
+//  Serial.print("Len: ");
+//  Serial.print(len);
+//  Serial.print("Size:");
+//  Serial.println(size);
+
+  for(uint8_t i = 0; i < (size - len); i++){
+    Serial.print("0");
+  }
+
+  Serial.print(num, HEX);
 }
